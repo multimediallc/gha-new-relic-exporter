@@ -1,4 +1,4 @@
-FROM public.ecr.aws/docker/library/python:3.10-slim-bookworm
+FROM us-central1-docker.pkg.dev/mmllc-dev/docker-combined/python:3.10-slim-bookworm
 
 WORKDIR /app
 
