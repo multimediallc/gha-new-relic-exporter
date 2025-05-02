@@ -20,10 +20,25 @@ GHA_TOKEN = os.getenv('GHA_TOKEN')
 NEW_RELIC_LICENSE_KEY = os.getenv('NEW_RELIC_LICENSE_KEY')
 OTEL_EXPORTER_OTEL_ENDPOINT = os.getenv('OTEL_EXPORTER_OTEL_ENDPOINT')
 GHA_RUN_ID = os.getenv('GHA_RUN_ID')
-GHA_SERVICE_NAME=os.getenv('GITHUB_REPOSITORY')
-GITHUB_REPOSITORY_OWNER=os.getenv('GITHUB_REPOSITORY_OWNER')
 GHA_RUN_NAME=os.getenv('GHA_RUN_NAME')
 GITHUB_API_URL=os.getenv('GITHUB_API_URL')
+
+if "GHA_EXPORT_LOGS" in os.environ and os.getenv('GHA_EXPORT_LOGS').lower() == "false":
+    GHA_EXPORT_LOGS=False
+    print("INFO: Not configured to send logs to backend")
+else:
+    print("INFO: Configured to send logs to backend")
+    GHA_EXPORT_LOGS=True
+
+if 'GHA_REPOSITORY' in os.environ:
+    GHA_SERVICE_NAME=os.getenv('GHA_REPOSITORY')
+else:
+    GHA_SERVICE_NAME=os.getenv('GITHUB_REPOSITORY')
+
+if 'GHA_REPOSITORY_OWNER' in os.environ:
+    GITHUB_REPOSITORY_OWNER=os.getenv('GHA_REPOSITORY_OWNER')
+else:
+    GITHUB_REPOSITORY_OWNER=os.getenv('GITHUB_REPOSITORY_OWNER')
 
 # Check if debug is set
 if "GHA_DEBUG" in os.environ and os.getenv('GHA_DEBUG').lower() == "true":
@@ -49,7 +64,7 @@ api = GhApi(owner=GITHUB_REPOSITORY_OWNER, repo=GHA_SERVICE_NAME.split('/')[1], 
 
 # Github API calls
 get_workflow_run_by_run_id = do_fastcore_decode(api.actions.get_workflow_run(GHA_RUN_ID))
-get_workflow_run_jobs_by_run_id = do_fastcore_decode(api.actions.list_jobs_for_workflow_run(GHA_RUN_ID))
+get_workflow_run_jobs_by_run_id = do_fastcore_decode(api.actions.list_jobs_for_workflow_run(GHA_RUN_ID, page=1, per_page=100))
 
 #Set OTEL resources
 global_attributes={
@@ -59,7 +74,21 @@ global_attributes={
     "github.resource.type": "span"
 }
 
+# Example: GHA_CUSTOM_ATTS: '{"mycustomattributea":"test", "mycustomattributeb":10, "mycustomattributec":"My custom attribute"}'
+# Check for custom attributes
+if "GHA_CUSTOM_ATTS" in os.environ:
+    GHA_CUSTOM_ATTS = os.environ["GHA_CUSTOM_ATTS"]
+else:
+    GHA_CUSTOM_ATTS = ""
 
+
+if GHA_CUSTOM_ATTS != "":
+    try:
+        global_attributes.update(json.loads(GHA_CUSTOM_ATTS))
+    except:
+        print("Error parsing GHA_CUSTOM_ATTS check your configuration, continuing without custom attributes")
+        pass
+    
 #Set workflow level tracer and logger
 global_resource = Resource(attributes=global_attributes)
 tracer = get_tracer(endpoint, headers, global_resource, "tracer")
@@ -115,7 +144,15 @@ for job in job_lst:
                 print("Processing step ->",step['name'],"from job",job['name'])
                 # Set steps tracer and logger
                 resource_attributes ={SERVICE_NAME: GHA_SERVICE_NAME,"github.source": "github-exporter","github.resource.type": "span","workflow_run_id": GHA_RUN_ID}
+                # Add custom attributes if they exist
+                if GHA_CUSTOM_ATTS != "":
+                    try:
+                        resource_attributes.update(json.loads(GHA_CUSTOM_ATTS))
+                    except:
+                        print("Error parsing GHA_CUSTOM_ATTS check your configuration, continuing without custom attributes")
+                        pass
                 resource_log = Resource(attributes=resource_attributes)
+                
                 step_tracer = get_tracer(endpoint, headers, resource_log, "step_tracer")
                 
                 resource_attributes.update(create_resource_attributes(parse_attributes(step,"","step"),GHA_SERVICE_NAME))
@@ -136,7 +173,7 @@ for job in job_lst:
                 with trace.use_span(child_1, end_on_exit=False):
                     # Parse logs
                     try:
-                        with open ("./logs/"+str(job["name"])+"/"+str(step['number'])+"_"+str(step['name'].replace("/",""))+".txt") as f:
+                        with open ("./logs/"+str(job["name"]).replace("/", "")+"/"+str(step['number'])+"_"+str(step['name'].replace("/",""))+".txt") as f:
                             for line in f.readlines():
                                 try:
                                     line_to_add = line[29:-1].strip()
@@ -152,18 +189,34 @@ for job in job_lst:
                                         unix_timestamp = parsed_t.timestamp()*1000
                                         if line_to_add.lower().startswith("##[error]"):
                                             child_1.set_status(Status(StatusCode.ERROR,line_to_add[9:]))
-                                            child_0.set_status(Status(StatusCode.ERROR,"STEP: "+str(step['name'])+" failed"))                                       
-                                            job_logger._log(level=logging.ERROR,msg=line_to_add,extra={"log.timestamp":unix_timestamp,"log.time":timestamp_to_add},args="")
+                                            child_0.set_status(Status(StatusCode.ERROR,"STEP: "+str(step['name'])+" failed"))     
+                                            if GHA_EXPORT_LOGS:
+                                                job_logger._log(level=logging.ERROR,msg=line_to_add,extra={"log.timestamp":unix_timestamp,"log.time":timestamp_to_add},args="")
+                                            else:
+                                                pass
                                         elif line_to_add.lower().startswith("##[warning]"):
-                                            job_logger._log(level=logging.WARNING,msg=line_to_add,extra={"log.timestamp":unix_timestamp,"log.time":timestamp_to_add},args="")
+                                            if GHA_EXPORT_LOGS:
+                                                job_logger._log(level=logging.WARNING,msg=line_to_add,extra={"log.timestamp":unix_timestamp,"log.time":timestamp_to_add},args="")
+                                            else:
+                                                pass
                                         elif line_to_add.lower().startswith("##[notice]"): 
                                             #Notice (notice): applies to normal but significant conditions that may require monitoring.
                                             # Applying INFO4 aka 12 -> https://opentelemetry.io/docs/specs/otel/logs/data-model/#displaying-severity
-                                            job_logger._log(level=12,msg=line_to_add,extra={"log.timestamp":unix_timestamp,"log.time":timestamp_to_add},args="")
+                                            if GHA_EXPORT_LOGS:
+                                                job_logger._log(level=12,msg=line_to_add,extra={"log.timestamp":unix_timestamp,"log.time":timestamp_to_add},args="")
+                                            else:
+                                                print("Logs not exported")
+                                                pass
                                         elif line_to_add.lower().startswith("##[debug]"):
-                                            job_logger._log(level=logging.DEBUG,msg=line_to_add,extra={"log.timestamp":unix_timestamp,"log.time":timestamp_to_add},args="")
+                                            if GHA_EXPORT_LOGS:
+                                                job_logger._log(level=logging.DEBUG,msg=line_to_add,extra={"log.timestamp":unix_timestamp,"log.time":timestamp_to_add},args="")
+                                            else:
+                                                pass
                                         else:
-                                            job_logger._log(level=logging.INFO,msg=line_to_add,extra={"log.timestamp":unix_timestamp,"log.time":timestamp_to_add},args="")
+                                            if GHA_EXPORT_LOGS:
+                                                job_logger._log(level=logging.INFO,msg=line_to_add,extra={"log.timestamp":unix_timestamp,"log.time":timestamp_to_add},args="")
+                                            else:
+                                                pass
                                             
                                 except Exception as e:
                                     print("Error exporting log line ERROR: ", e)
@@ -172,7 +225,7 @@ for job in job_lst:
                             print("Log file not expected for this step ->",step['name'],"<- because its status is ->",step['conclusion'])
                             pass #We don't expect log file to exist
                         else:
-                            print("ERROR: Log file does not exist: "+str(job["name"])+"/"+str(step['number'])+"_"+str(step['name'].replace("/",""))+".txt")
+                            print("ERROR: Log file does not exist: "+str(job["name"]).replace("/", "")+"/"+str(step['number'])+"_"+str(step['name'].replace("/",""))+".txt")
                             
 
                 if step['conclusion'] == 'skipped' or step['conclusion'] == 'cancelled':
