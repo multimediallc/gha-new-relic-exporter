@@ -3,7 +3,7 @@ opentelemetry.sdk
 opentelemetry.exporter.otlp.proto.grpc
 opentelemetry.instrumentation.logging
 pyrfc3339
-ghapi
+ghapi==1.0.6
 requests
 python-dateutil
 
